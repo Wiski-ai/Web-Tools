@@ -7,7 +7,7 @@ Important — Légalité et éthique
   - CTF / challenges conçus pour cela,
   - Environnements de test que tu possèdes ou auxquels tu as accès,
   - Clients/entreprises seulement si tu as un contrat ou une autorisation écrite.
-- Toute utilisation sans autorisation peut être illégale et causer des dommages. L'auteur (Dev by H8Laws) décline toute responsabilité pour un usage inapproprié.
+- Toute utilisation sans autorisation peut être illégale et causer des dommages. L'auteur (H8Laws) décline toute responsabilité pour un usage inapproprié.
 
 Bonnes pratiques
 - Limite la portée (scope) de tes tests. Respecte les règles du challenge ou du contrat.
@@ -35,5 +35,5 @@ Quelques recommandations pratiques
 - Pour tout doute légal, consulte un juriste ou demande l'autorisation formelle.
 
 Contact / Auteurs
-- Outils fournis par : Dev by H8Laws
+- Outils fournis par : H8Laws
 - Ces outils sont fournis "as-is" pour apprentissage, CTF et environnements de test.
