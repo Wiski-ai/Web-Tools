@@ -9,28 +9,25 @@ Dev by H8Laws
 
 Usage:
   python3 H8Suite.py
+
 Notes:
   - Exécuter uniquement sur cibles autorisées (CTF, labo perso, pentest avec autorisation).
   - Le script demande confirmation explicite pour tests potentiellement intrusifs.
 """
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 import ssl
 import json
-import socket
-import csv
-import subprocess
-import sys
 import os
 import re
-import time
+import sys
 import urllib.parse
+import difflib
 
 # ---------- Meta / Banner ----------
 TOOL_NAME = "H8Suite"
-TOOL_VERSION = "1.0"
-TOOL_AUTHOR = "Dev by H8Laws"
+TOOL_VERSION = "1.1"
+TOOL_AUTHOR = "Dev by H8Laws (patched)"
 
 ASCII = [
 "__  ______  ____                      ",
@@ -64,10 +61,15 @@ def prefix(tag):
     return c(tag, CYAN)
 
 # ---------- Network context ----------
+# SSL verification can be toggled via environment variable:
+# export H8SUITE_SSL_VERIFY=true
+VERIFY_SSL = os.getenv("H8SUITE_SSL_VERIFY", "false").lower() in ("1","true","yes")
 CTX = ssl.create_default_context()
-CTX.check_hostname = False
-CTX.verify_mode = ssl.CERT_NONE
-UA = f"{TOOL_NAME}/1.0"
+if not VERIFY_SSL:
+    CTX.check_hostname = False
+    CTX.verify_mode = ssl.CERT_NONE
+
+UA = f"{TOOL_NAME}/{TOOL_VERSION}"
 
 # ---------- Utilities ----------
 def safe_input(prompt="> "):
@@ -100,10 +102,14 @@ FETCH_RX = re.compile(r"""fetch\(\s*['"]([^'"]+)['"]""", re.IGNORECASE)
 AXIOS_RX = re.compile(r"""axios\.(?:get|post|put|delete|request)\(\s*['"]([^'"]+)['"]""", re.IGNORECASE)
 XH_RQ_RX = re.compile(r"""open\(\s*['"][A-Z]+['"]\s*,\s*['"]([^'"]+)['"]""", re.IGNORECASE)
 
-def fetch_url(url):
+# Extensions and schemes to ignore
+IGNORE_EXTS = ('.png', '.jpg', '.jpeg', '.svg', '.css', '.woff', '.woff2', '.map', '.ico', '.ttf', '.eot', '.otf')
+IGNORE_SCHEMES = ('data:', 'mailto:', 'javascript:', 'tel:')
+
+def fetch_url(url, timeout=20):
     req = Request(url, headers={"User-Agent": UA})
     try:
-        with urlopen(req, timeout=20, context=CTX) as r:
+        with urlopen(req, timeout=timeout, context=CTX) as r:
             return r.read().decode(errors="ignore")
     except (HTTPError, URLError) as e:
         print(prefix("[!]"), c(f"Erreur fetch {url}: {e}", RED))
@@ -111,33 +117,64 @@ def fetch_url(url):
         print(prefix("[!]"), c(f"Erreur fetch {url}: {e}", RED))
     return ""
 
-def extract_from_text(text):
+def normalize_endpoint(u, base_url=None):
+    u = u.strip()
+    if not u:
+        return ""
+    # Drop surrounding quotes if any
+    if (u[0] == u[-1]) and u[0] in ('"', "'"):
+        u = u[1:-1].strip()
+    low = u.lower()
+    for s in IGNORE_SCHEMES:
+        if low.startswith(s):
+            return ""
+    # If base_url provided, join relative paths
+    if base_url and not low.startswith("http"):
+        try:
+            u = urllib.parse.urljoin(base_url, u)
+        except Exception:
+            pass
+    # filter by extension
+    path = urllib.parse.urlparse(u).path
+    if any(path.lower().endswith(ext) for ext in IGNORE_EXTS):
+        return ""
+    return u
+
+def extract_from_text(text, base_url=None):
     results = set()
     for m in URL_LIKE.finditer(text):
         u = m.group(1).strip()
-        if len(u) > 2 and not u.endswith(('.png', '.jpg', '.svg', '.css')):
-            results.add(u)
+        nu = normalize_endpoint(u, base_url=base_url)
+        if nu:
+            results.add(nu)
     for rx in (FETCH_RX, AXIOS_RX, XH_RQ_RX):
         for m in rx.finditer(text):
             u = m.group(1).strip()
-            results.add(u)
+            nu = normalize_endpoint(u, base_url=base_url)
+            if nu:
+                results.add(nu)
     return results
+
+from urllib.parse import urljoin
 
 def crawl_page_for_js(page_url):
     html = fetch_url(page_url)
     js_urls = set()
     for m in re.finditer(r'<script[^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE):
         src = m.group(1).strip()
+        if not src:
+            continue
+        if src.lower().startswith("data:"):
+            continue
         if src.startswith("//"):
             src = "https:" + src
-        elif src.startswith("/"):
-            base = page_url.rstrip("/")
-            parts = base.split("/")
-            origin = "/".join(parts[0:3])
-            src = origin + src
-        elif not src.startswith("http"):
-            base = page_url.rstrip("/")
-            src = base + "/" + src.lstrip("/")
+        else:
+            try:
+                src = urljoin(page_url, src)
+            except Exception:
+                # fallback simple join
+                base = page_url.rstrip("/")
+                src = base + "/" + src.lstrip("/")
         js_urls.add(src)
     return js_urls
 
@@ -160,7 +197,7 @@ def js_extractor_flow():
             print(prefix("[!]"), c("URL invalide.", RED)); return
         print(prefix("[*]"), c(f"Fetching {url} ...", BLUE))
         text = fetch_url(url)
-        endpoints |= extract_from_text(text)
+        endpoints |= extract_from_text(text, base_url=url)
     elif mode == "3":
         page = safe_input("URL de la page HTML > ").strip()
         if not page.startswith("http"):
@@ -172,7 +209,7 @@ def js_extractor_flow():
         for js in sorted(js_assets):
             print(prefix("[*]"), c(f"Fetching {js}", CYAN))
             text = fetch_url(js)
-            endpoints |= extract_from_text(text)
+            endpoints |= extract_from_text(text, base_url=js if js.startswith("http") else page)
     else:
         print(prefix("[!]"), c("Option invalide.", RED))
         return
@@ -196,6 +233,8 @@ DEFAULT_PAYLOADS = [
 ]
 
 def build_url_with_param(url, param, value):
+    if not param:
+        return url
     p = urllib.parse.urlparse(url)
     q = urllib.parse.parse_qs(p.query, keep_blank_values=True)
     q[param] = [value]
@@ -203,41 +242,82 @@ def build_url_with_param(url, param, value):
     p = p._replace(query=new_q)
     return urllib.parse.urlunparse(p)
 
-def send_request(url, method="GET", headers=None, body=None):
+def send_request(url, method="GET", headers=None, body=None, timeout=20):
     headers = headers or {}
     headers.setdefault("User-Agent", UA)
+    data = None
     if body is not None:
         if isinstance(body, dict):
             data = json.dumps(body).encode()
             headers.setdefault("Content-Type", "application/json")
         else:
             data = str(body).encode()
-        req = Request(url, data=data, headers=headers, method=method)
-    else:
-        req = Request(url, headers=headers, method=method)
+            headers.setdefault("Content-Type", "text/plain")
+    # Build Request, handle older Python who may not accept method parameter
     try:
-        with urlopen(req, timeout=20, context=CTX) as r:
+        req = Request(url, data=data, headers=headers, method=method)
+    except TypeError:
+        req = Request(url, data=data, headers=headers)
+        # fallback: override get_method
+        req.get_method = lambda _m=method: _m
+    try:
+        with urlopen(req, timeout=timeout, context=CTX) as r:
             content = r.read()
-            return r.getcode(), len(content), content[:512]
+            try:
+                snippet = content[:512].decode(errors="replace")
+            except Exception:
+                snippet = str(content[:512])
+            return r.getcode(), len(content), snippet
     except HTTPError as e:
         try:
-            content = e.read()[:512]
-            return e.code, len(content), content
+            content = e.read() or b""
+            try:
+                snippet = content[:512].decode(errors="replace")
+            except Exception:
+                snippet = str(content[:512])
+            return e.code, len(content), snippet
         except Exception:
-            return e.code, 0, b""
+            return e.code, 0, ""
     except URLError as e:
-        return None, 0, str(e).encode()
+        return None, 0, str(e)
     except Exception as e:
-        return None, 0, str(e).encode()
+        return None, 0, str(e)
 
-def compare_responses(base, other):
+def compare_responses(base, other, body_thresh=0.90):
+    """
+    base and other are tuples: (status:int|None, length:int, snippet:str)
+    Returns list of diff descriptions (empty if considered same).
+    """
     diffs = []
-    if base[0] != other[0]:
-        diffs.append(f"status {base[0]} -> {other[0]}")
-    if base[1] != other[1]:
-        diffs.append(f"len {base[1]} -> {other[1]}")
-    if base[2] != other[2]:
-        diffs.append("body snippet differs")
+    try:
+        b_status, b_len, b_snip = base
+    except Exception:
+        return ["invalid base response"]
+    try:
+        o_status, o_len, o_snip = other
+    except Exception:
+        return ["invalid other response"]
+    if b_status != o_status:
+        diffs.append(f"status {b_status} -> {o_status}")
+    if b_len != o_len:
+        diffs.append(f"len {b_len} -> {o_len}")
+    # compare body similarity
+    if isinstance(b_snip, bytes):
+        try:
+            b_snip = b_snip.decode(errors="replace")
+        except Exception:
+            b_snip = str(b_snip)
+    if isinstance(o_snip, bytes):
+        try:
+            o_snip = o_snip.decode(errors="replace")
+        except Exception:
+            o_snip = str(o_snip)
+    # small optimization: if both empty, treat equal
+    if (not b_snip) and (not o_snip):
+        return diffs
+    ratio = difflib.SequenceMatcher(None, b_snip, o_snip).ratio()
+    if ratio < body_thresh:
+        diffs.append(f"body_sim={ratio:.2f}")
     return diffs
 
 def logic_bypass_flow():
@@ -257,14 +337,16 @@ def logic_bypass_flow():
             print(prefix("[!]"), c("Wordlist introuvable.", RED)); return
         with open(wl, "r", encoding="utf-8", errors="ignore") as fh:
             payloads = [l.strip() for l in fh if l.strip()]
+
+    # Baseline should be executed only after explicit permission
+    if not confirm_permission():
+        print(prefix("[!]"), c("Confirmation non fournie. Abort.", RED))
+        return
+
     print(prefix("[*]"), c("Baseline request...", BLUE))
     url_baseline = build_url_with_param(target, param, base_value) if param else target
     base_resp = send_request(url_baseline, method=method)
     print(prefix("[+]"), c(f"Baseline: status={base_resp[0]} len={base_resp[1]}", GREEN))
-
-    if not confirm_permission():
-        print(prefix("[!]"), c("Confirmation non fournie. Abort.", RED))
-        return
 
     results = []
     if param:
@@ -317,6 +399,8 @@ def print_banner():
     meta = f" {TOOL_NAME} - v{TOOL_VERSION} - {TOOL_AUTHOR} "
     print(c(meta.center(60), CYAN, True))
     print()
+    if not VERIFY_SSL:
+        print(prefix("[!]"), c("SSL verification is DISABLED (set H8SUITE_SSL_VERIFY=true to enable).", YELLOW))
 
 def print_menu():
     print()
