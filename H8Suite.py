@@ -77,6 +77,8 @@ def safe_input(prompt="> "):
         return input(prompt)
     except EOFError:
         return ""
+    except KeyboardInterrupt:
+        return ""
 
 def confirm_permission():
     print(c("ATTENTION:", YELLOW, True),
@@ -122,7 +124,7 @@ def normalize_endpoint(u, base_url=None):
     if not u:
         return ""
     # Drop surrounding quotes if any
-    if (u[0] == u[-1]) and u[0] in ('"', "'"):
+    if (len(u) >= 2) and (u[0] == u[-1]) and u[0] in ('"', "'"):
         u = u[1:-1].strip()
     low = u.lower()
     for s in IGNORE_SCHEMES:
@@ -135,13 +137,18 @@ def normalize_endpoint(u, base_url=None):
         except Exception:
             pass
     # filter by extension
-    path = urllib.parse.urlparse(u).path
+    try:
+        path = urllib.parse.urlparse(u).path
+    except Exception:
+        path = ""
     if any(path.lower().endswith(ext) for ext in IGNORE_EXTS):
         return ""
     return u
 
 def extract_from_text(text, base_url=None):
     results = set()
+    if not text:
+        return results
     for m in URL_LIKE.finditer(text):
         u = m.group(1).strip()
         nu = normalize_endpoint(u, base_url=base_url)
@@ -209,7 +216,9 @@ def js_extractor_flow():
         for js in sorted(js_assets):
             print(prefix("[*]"), c(f"Fetching {js}", CYAN))
             text = fetch_url(js)
-            endpoints |= extract_from_text(text, base_url=js if js.startswith("http") else page)
+            # base_url for relative resolution should be the JS asset (if absolute) or page
+            base_for_js = js if js.startswith("http") else page
+            endpoints |= extract_from_text(text, base_url=base_for_js)
     else:
         print(prefix("[!]"), c("Option invalide.", RED))
         return
@@ -243,12 +252,16 @@ def build_url_with_param(url, param, value):
     return urllib.parse.urlunparse(p)
 
 def send_request(url, method="GET", headers=None, body=None, timeout=20):
-    headers = headers or {}
+    # Copy headers to avoid mutating caller's dict
+    headers = dict(headers or {})
     headers.setdefault("User-Agent", UA)
     data = None
     if body is not None:
         if isinstance(body, dict):
-            data = json.dumps(body).encode()
+            try:
+                data = json.dumps(body).encode()
+            except Exception:
+                data = str(body).encode()
             headers.setdefault("Content-Type", "application/json")
         else:
             data = str(body).encode()
@@ -258,7 +271,7 @@ def send_request(url, method="GET", headers=None, body=None, timeout=20):
         req = Request(url, data=data, headers=headers, method=method)
     except TypeError:
         req = Request(url, data=data, headers=headers)
-        # fallback: override get_method
+        # fallback: override get_method (no args)
         req.get_method = lambda _m=method: _m
     try:
         with urlopen(req, timeout=timeout, context=CTX) as r:
@@ -301,7 +314,7 @@ def compare_responses(base, other, body_thresh=0.90):
         diffs.append(f"status {b_status} -> {o_status}")
     if b_len != o_len:
         diffs.append(f"len {b_len} -> {o_len}")
-    # compare body similarity
+    # ensure strings for body comparison
     if isinstance(b_snip, bytes):
         try:
             b_snip = b_snip.decode(errors="replace")
@@ -315,7 +328,7 @@ def compare_responses(base, other, body_thresh=0.90):
     # small optimization: if both empty, treat equal
     if (not b_snip) and (not o_snip):
         return diffs
-    ratio = difflib.SequenceMatcher(None, b_snip, o_snip).ratio()
+    ratio = difflib.SequenceMatcher(None, b_snip or "", o_snip or "").ratio()
     if ratio < body_thresh:
         diffs.append(f"body_sim={ratio:.2f}")
     return diffs
@@ -370,8 +383,10 @@ def logic_bypass_flow():
             ({"X-HTTP-Method-Override":"GET"}, "Method-Override=GET"),
         ]
         for hdr, tag in header_tests:
+            # pass a copy so send_request.set_default doesn't mutate header_tests
+            hdr_copy = dict(hdr)
             url_try = build_url_with_param(target, param, base_value) if param else target
-            status, length, snippet = send_request(url_try, method=method, headers=hdr)
+            status, length, snippet = send_request(url_try, method=method, headers=hdr_copy)
             diffs = compare_responses(base_resp, (status,length,snippet))
             marker = c("DIFF", RED, True) if diffs else c("SAME", DIM)
             print(f" - {c(tag, MAGENTA):30} -> status={c(status, CYAN)} len={c(length, CYAN)} [{marker}]")
