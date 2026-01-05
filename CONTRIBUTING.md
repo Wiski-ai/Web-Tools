@@ -19,4 +19,4 @@ Confirmation d'utilisation
 - Les scripts inclus peuvent demander une confirmation explicite ("I_HAVE_PERMISSION") avant d'exécuter des tests potentiellement sensibles.
 - Si tu modifies ce comportement, documente clairement le changement et garde la confirmation par défaut.
 
-Si tu découvres un incident de sécurité concernant ce dépôt, contacte l'auteur (Dev by H8Laws) via l'adresse fournie dans le repo (ou ouvre un ticket privé si disponible).
+Si tu découvres un incident de sécurité concernant ce dépôt, contacte l'auteur (H8Laws) via l'adresse fournie dans le repo (ou ouvre un ticket privé si disponible).
