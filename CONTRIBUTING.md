@@ -1,22 +1,23 @@
-Contributing & Responsible Disclosure
+## Contributing & Responsible Disclosure
 
-Merci d'envisager de contribuer à ce projet. Avant toute contribution ou test, lis attentivement ce qui suit.
+Thank you for considering contributing to this project. Before any contribution or testing, please read the following carefully.
 
-Règles pour contributeurs
-- Respecte la loi et l'éthique : n'utilise pas les fonctionnalités pour des actions non autorisées.
-- Signale les vulnérabilités de façon responsable :
-  1. Contacte le propriétaire/mainteneur du projet cible via les canaux officiels (e-mail sécurité, bug bounty, formulaire).
-  2. Fournis un rapport clair, reproductible, et sans divulgation publique initiale.
-  3. Donne au mainteneur un délai raisonnable pour corriger.
-- N'ajoute pas de code qui facilite l'exploitation malveillante ; toute contribution doit inclure un objectif pédagogique ou défensif clair.
+### Rules for Contributors
+- **Respect the law and ethics**: do not use the features for unauthorized actions.
+- **Report vulnerabilities responsibly**:
+  1. Contact the owner/maintainer of the target project through official channels (security email, bug bounty program, form).
+  2. Provide a clear, reproducible report, without initial public disclosure.
+  3. Allow the maintainer a reasonable timeframe to apply a fix.
+- **Do not add code that facilitates malicious exploitation**; any contribution must include a clear educational or defensive purpose.
 
-Processus de contribution
-- Fork → branche feature → Pull Request.
-- Inclure tests/documentation pour tout changement.
-- Respecte le style du projet et ajoute un changelog descriptif.
+### Contribution Process
+- Fork → feature branch → Pull Request.
+- Include tests/documentation for any change.
+- Follow the project style and add a descriptive changelog.
 
-Confirmation d'utilisation
-- Les scripts inclus peuvent demander une confirmation explicite ("I_HAVE_PERMISSION") avant d'exécuter des tests potentiellement sensibles.
-- Si tu modifies ce comportement, documente clairement le changement et garde la confirmation par défaut.
+### Usage Confirmation
+- Included scripts may require explicit confirmation ("I_HAVE_PERMISSION") before running potentially sensitive tests.
+- If you modify this behavior, clearly document the change and keep confirmation enabled by default.
 
-Si tu découvres un incident de sécurité concernant ce dépôt, contacte l'auteur (H8Laws) via l'adresse fournie dans le repo (ou ouvre un ticket privé si disponible).
+If you discover a security incident related to this repository, contact the author (H8Laws) via the address provided in the repo (or open a private issue if available).
+- You can donate me on paypal h8l4ws@gmail.com 
