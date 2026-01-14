@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-fentanyle.py - Terminal GUI wrapper for curl (single-file)
+fentanyle.py - Terminal GUI wrapper for curl 
 Author: H8Laws
 License: Use responsibly
 Requires: Python 3.6+, curl installed on PATH
