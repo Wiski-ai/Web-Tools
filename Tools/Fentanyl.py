@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 fentanyle.py - Terminal GUI wrapper for curl (single-file)
-Author: Generated for user H8Laws (example)
+Author: H8Laws
 License: Use responsibly
 Requires: Python 3.6+, curl installed on PATH
 
